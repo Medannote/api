@@ -1,4 +1,29 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, BackgroundTasks
+import os
+import pydicom
+import nibabel as nib
+import numpy as np
+import pandas as pd
+from skimage.transform import resize
+from skimage import exposure
+import shutil
+import json
+from datetime import datetime
+from typing import List
+from PIL import Image
+
+import wfdb
+import pandas as pd
+import os
+import numpy as np
+import glob
+import uuid
+import tempfile
+import zipfile
+import io
+from typing import List, Dict, Optional
+from pathlib import Path
+
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, BackgroundTasks, APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
 import pandas as pd
 from collections import Counter
@@ -24,31 +49,171 @@ try:
 except:
     pass
 
-app = FastAPI(
-    title="API d'Analyse de Rapports Médicaux",
-    description="API pour analyser et traiter des rapports médicaux en français avec support multi-fichiers et export ZIP",
-    version="2.0.0"
-)
 
-# Modèles Pydantic pour les réponses
-class PatientInfo(BaseModel):
-    Nom: Optional[str] = None
-    Prénom: Optional[str] = None
-    Age: Optional[int] = None
-    Date: Optional[str] = None
-    Symptômes: Optional[str] = None
-    Antécédents: Optional[str] = None
-    Diagnostic: Optional[str] = None
-    Traitement: Optional[str] = None
+from fastapi import FastAPI, UploadFile, File, HTTPException, APIRouter
+from fastapi.responses import StreamingResponse
+import io
 
-class ColonnesRequest(BaseModel):
-    colonnes_a_supprimer: List[str]
+def anonymize_dicom(dicom_data: pydicom.dataset.FileDataset) -> pydicom.dataset.FileDataset:
+    """Anonymise les données sensibles du fichier DICOM."""
+    tags_to_remove = [
+        (0x0010, 0x0010), (0x0010, 0x0020), (0x0010, 0x0030), (0x0010, 0x0040),
+        (0x0010, 0x1000), (0x0010, 0x1001), (0x0010, 0x2160), (0x0008, 0x0020),
+        (0x0008, 0x0030), (0x0008, 0x0090), (0x0008, 0x1050), (0x0008, 0x1080)
+    ]
+    anonymized_dicom = dicom_data.copy()
+    for tag in tags_to_remove:
+        if tag in anonymized_dicom:
+            del anonymized_dicom[tag]
+    anonymized_dicom.InstitutionName = "Anonymized Healthcare Facility"
+    return anonymized_dicom
 
-class BatchProcessingResult(BaseModel):
-    nombre_fichiers_traites: int
-    fichiers_reussis: List[str]
-    fichiers_echecs: List[Dict[str, str]]
-    donnees_combinees: List[Dict]
+def convert_dicom_to_nifti(dicom_data: pydicom.dataset.FileDataset, patient_id: str, study_id: str, series_id: str):
+    """Convertit un fichier DICOM en format NIfTI et extrait les métadonnées."""
+    try:
+        pixel_array = dicom_data.pixel_array
+        nifti_img = nib.Nifti1Image(pixel_array, np.eye(4))
+
+        metadata = {
+            'patient_id': patient_id,
+            'study_id': study_id,
+            'series_id': series_id,
+            'original_sop_instance_uid': str(dicom_data.get('SOPInstanceUID', 'Unknown')),
+            'image_dimensions': pixel_array.shape,
+            'pixel_spacing': [float(i) for i in dicom_data.get('PixelSpacing', [1.0, 1.0])],
+            'modality': str(dicom_data.get('Modality', 'Unknown')),
+            'conversion_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        return {'metadata': metadata, 'nifti_img': nifti_img, 'pixel_array': pixel_array}
+    except Exception as e:
+        print(f"Erreur lors de la conversion en NIfTI : {e}")
+        return None
+
+def resize_image(image_array: np.ndarray, target_size=(256, 256)) -> np.ndarray:
+    """Redimensionne l'image à la taille cible."""
+    if len(image_array.shape) > 2:
+        resized_slices = []
+        for i in range(image_array.shape[0]):
+            img = Image.fromarray(image_array[i].astype(np.float32))
+            img = img.resize(target_size, Image.Resampling.LANCZOS)
+            resized_slices.append(np.array(img))
+        return np.stack(resized_slices, axis=0)
+    else:
+        img = Image.fromarray(image_array.astype(np.float32))
+        img = img.resize(target_size, Image.Resampling.LANCZOS)
+        return np.array(img)
+
+def normalize_image(image_array: np.ndarray) -> np.ndarray:
+    """Normalise les valeurs de pixel de l'image entre 0 et 1."""
+    min_val = np.min(image_array)
+    max_val = np.max(image_array)
+    if max_val - min_val > 0:
+        normalized_image = (image_array - min_val) / (max_val - min_val)
+    else:
+        normalized_image = image_array.astype(np.float32)
+    return normalized_image
+
+def apply_histogram_equalization(image_array: np.ndarray) -> np.ndarray:
+    """Applique l'égalisation d'histogramme à l'image."""
+    if len(image_array.shape) > 2:
+        equalized_slices = []
+        for i in range(image_array.shape[0]):
+            equalized_slices.append(exposure.equalize_hist(image_array[i]))
+        return np.stack(equalized_slices, axis=0)
+    else:
+        return exposure.equalize_hist(image_array)
+
+
+# Fonctions de traitement des signaux (adaptées de votre code)
+def afficher_toutes_metadonnées(signal_path: str) -> Dict:
+    """Affiche toutes les métadonnées disponibles d'un signal médical."""
+    try:
+        record = wfdb.rdheader(signal_path)
+        return record.__dict__
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture des métadonnées : {e}")
+
+def stocker_csv(folder_path: str) -> pd.DataFrame:
+    """
+    Extrait les métadonnées de tous les signaux WFDB d'un dossier
+    et les renvoie sous forme d'un DataFrame pandas.
+    """
+    all_metadata = []
+    
+    # Parcourt tous les fichiers .hea dans le dossier
+    hea_files = glob.glob(os.path.join(folder_path, '*.hea'))
+    
+    if not hea_files:
+        raise HTTPException(status_code=404, detail=f"Aucun fichier .hea trouvé dans le dossier : {folder_path}")
+    
+    for file_path in hea_files:
+        signal_name = os.path.basename(file_path).replace('.hea', '')
+        
+        try:
+            record = wfdb.rdheader(os.path.join(folder_path, signal_name))
+            
+            metadata_dict = {'signal_name': signal_name}
+            for key, value in record.__dict__.items():
+                if key.startswith('_') or key in ['e_p_signal', 'e_p_sig_name']:
+                    continue
+                
+                if isinstance(value, (list, tuple)):
+                    value = str(value)
+                
+                metadata_dict[key] = value
+            
+            all_metadata.append(metadata_dict)
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Erreur lors du traitement du signal '{signal_name}' : {e}")
+    
+    return pd.DataFrame(all_metadata)
+
+def plot_signal(signal_path: str) -> io.BytesIO:
+    """Lit et trace le graphique du signal, retourne l'image en mémoire."""
+    try:
+        record = wfdb.rdrecord(signal_path)
+        
+        # Créer le plot en mémoire
+        buffer = io.BytesIO()
+        plt.figure(figsize=(12, 6))
+        wfdb.plot_wfdb(record=record, title=f"Signal médical : {record.record_name}")
+        plt.savefig(buffer, format='png')
+        plt.close()
+        buffer.seek(0)
+        
+        return buffer
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors du traçage du signal : {e}")
+
+def division_df(folder_path: str) -> tuple:
+
+    """
+    Charge les métadonnées, génère un ID unique pour chaque enregistrement,
+    et divise le DataFrame en deux : informations personnelles et métadonnées médicales.
+    """
+    df = stocker_csv(folder_path)
+    
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="Aucune donnée chargée")
+    
+    # Générer un ID unique entier formaté sur 8 chiffres pour chaque enregistrement
+    df['id'] = [f'{i:08d}' for i in range(1, len(df) + 1)]
+    
+    # Définir les colonnes pour les informations personnelles
+    personal_info_cols = ['signal_name', 'id']
+    for col in ['nom', 'prenom', 'age', 'patient_name']:
+        if col in df.columns:
+            personal_info_cols.append(col)
+    
+    # Créer le DataFrame des informations personnelles
+    personal_info_df = df[personal_info_cols].copy()
+    
+    # Créer le DataFrame des métadonnées avec les colonnes restantes
+    metadata_cols = [col for col in df.columns if col not in ['nom', 'prenom', 'age', 'patient_name']]
+    metadata_df = df[metadata_cols].copy()
+    
+    return personal_info_df, metadata_df
 
 # Fonctions d'extraction et de traitement
 def extract_text_from_docx(file_content: bytes) -> List[str]:
@@ -371,283 +536,3 @@ L'ID d'annotation permet de relier les données personnelles aux données médic
     
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
-
-# Endpoints de l'API
-@app.get("/")
-async def root():
-    """Point d'entrée de l'API"""
-    return {
-        "message": "API d'Analyse de Rapports Médicaux", 
-        "version": "2.0.0",
-        "endpoints": {
-            "analyser_documents": "POST /analyser_documents - Analyse plusieurs documents médicaux",
-            "generer_annotations": "POST /generer_annotations - Génère des annotations pour plusieurs fichiers",
-            "telecharger_annotations_zip": "POST /telecharger_annotations_zip - Télécharge les annotations en format ZIP",
-            "supprimer_colonnes_zip": "POST /supprimer_colonnes_zip - Supprime des colonnes de plusieurs fichiers et retourne un ZIP"
-        }
-    }
-
-@app.post("/analyser_documents")
-async def analyser_documents(files: List[UploadFile] = File(...)):
-    """
-    Analyse plusieurs documents médicaux (DOCX ou TXT) et extrait les informations
-    """
-    try:
-        all_data = []
-        results = []
-        
-        for file in files:
-            try:
-                content = await file.read()
-                
-                if file.filename.lower().endswith('.docx'):
-                    lignes = extract_text_from_docx(content)
-                elif file.filename.lower().endswith('.txt'):
-                    text_content = content.decode('utf-8')
-                    lignes = [line.strip() for line in text_content.split('\n') if line.strip()]
-                else:
-                    results.append({
-                        "filename": file.filename,
-                        "status": "error",
-                        "error": "Format non supporté. Utilisez .docx ou .txt"
-                    })
-                    continue
-                
-                donnees = parse_report(lignes)
-                donnees["Fichier_source"] = file.filename
-                all_data.append(donnees)
-                
-                results.append({
-                    "filename": file.filename,
-                    "status": "success",
-                    "donnees_extraites": donnees
-                })
-                
-            except Exception as e:
-                results.append({
-                    "filename": file.filename,
-                    "status": "error",
-                    "error": str(e)
-                })
-        
-        df_combined = pd.DataFrame(all_data) if all_data else pd.DataFrame()
-        
-        return {
-            "nombre_fichiers": len(files),
-            "resultats": results,
-            "donnees_combinees": df_combined.to_dict('records')
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse des documents: {str(e)}")
-
-@app.post("/generer_annotations")
-async def generer_annotations(files: List[UploadFile] = File(...)):
-    """
-    Génère des annotations pour plusieurs fichiers de données médicales
-    """
-    try:
-        all_dfs = []
-        results = []
-        
-        for file in files:
-            try:
-                content = await file.read()
-                filename = file.filename.lower()
-                
-                # Lire le fichier selon son type
-                if filename.endswith('.docx'):
-                    lignes = extract_text_from_docx(content)
-                    donnees = parse_report(lignes)
-                    df = pd.DataFrame([donnees])
-                elif filename.endswith('.txt'):
-                    text_content = content.decode('utf-8')
-                    lignes = [line.strip() for line in text_content.split('\n') if line.strip()]
-                    donnees = parse_report(lignes)
-                    df = pd.DataFrame([donnees])
-                elif filename.endswith(('.xlsx', '.xls')):
-                    df = pd.read_excel(io.BytesIO(content))
-                elif filename.endswith('.csv'):
-                    df = pd.read_csv(io.BytesIO(content))
-                elif filename.endswith('.json'):
-                    df = pd.read_json(io.BytesIO(content))
-                else:
-                    results.append({
-                        "filename": file.filename,
-                        "status": "error",
-                        "error": "Format non supporté"
-                    })
-                    continue
-                
-                # Ajouter le nom du fichier source
-                df['Fichier_source'] = file.filename
-                all_dfs.append(df)
-                
-                # Générer les annotations
-                df1, df2 = Annotation(df)
-                
-                results.append({
-                    "filename": file.filename,
-                    "status": "success",
-                    "df_personnel": df1.to_dict('records') if df1 is not None else [],
-                    "df_medical": df2.to_dict('records') if df2 is not None else [],
-                    "nombre_enregistrements": len(df)
-                })
-                
-            except Exception as e:
-                results.append({
-                    "filename": file.filename,
-                    "status": "error",
-                    "error": str(e)
-                })
-        
-        # Combiner tous les DataFrames
-        df_combined = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
-        df1_combined, df2_combined = Annotation(df_combined)
-        
-        return {
-            "nombre_fichiers": len(files),
-            "resultats": results,
-            "df_personnel_combine": df1_combined.to_dict('records') if df1_combined is not None else [],
-            "df_medical_combine": df2_combined.to_dict('records') if df2_combined is not None else []
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la génération d'annotations: {str(e)}")
-
-@app.post("/telecharger_annotations_zip")
-async def telecharger_annotations_zip(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
-    """
-    Génère des annotations pour plusieurs fichiers et retourne un ZIP avec les résultats
-    """
-    try:
-        all_dfs = []
-        
-        for file in files:
-            try:
-                content = await file.read()
-                filename = file.filename.lower()
-                
-                # Lire le fichier selon son type
-                if filename.endswith('.docx'):
-                    lignes = extract_text_from_docx(content)
-                    donnees = parse_report(lignes)
-                    df = pd.DataFrame([donnees])
-                elif filename.endswith('.txt'):
-                    text_content = content.decode('utf-8')
-                    lignes = [line.strip() for line in text_content.split('\n') if line.strip()]
-                    donnees = parse_report(lignes)
-                    df = pd.DataFrame([donnees])
-                elif filename.endswith(('.xlsx', '.xls')):
-                    df = pd.read_excel(io.BytesIO(content))
-                elif filename.endswith('.csv'):
-                    df = pd.read_csv(io.BytesIO(content))
-                elif filename.endswith('.json'):
-                    df = pd.read_json(io.BytesIO(content))
-                else:
-                    continue  # Ignorer les formats non supportés
-                
-                # Ajouter le nom du fichier source
-                df['Fichier_source'] = file.filename
-                all_dfs.append(df)
-                
-            except Exception:
-                continue  # Ignorer les fichiers avec erreurs
-        
-        if not all_dfs:
-            raise HTTPException(status_code=400, detail="Aucun fichier valide à traiter")
-        
-        # Combiner tous les DataFrames et générer les annotations
-        df_combined = pd.concat(all_dfs, ignore_index=True)
-        df1_combined, df2_combined = Annotation(df_combined)
-        
-        # Créer le ZIP
-        zip_content = creer_zip_resultats(df1_combined, df2_combined)
-        
-        return StreamingResponse(
-            io.BytesIO(zip_content),
-            media_type="application/zip",
-            headers={"Content-Disposition": "attachment; filename=annotations_medicales.zip"}
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la génération du ZIP: {str(e)}")
-
-@app.post("/supprimer_colonnes_zip")
-async def supprimer_colonnes_zip(
-    background_tasks: BackgroundTasks,
-    colonnes_a_supprimer: List[str] = Form(...),
-    files: List[UploadFile] = File(...)
-):
-    """
-    Supprime des colonnes de plusieurs fichiers et retourne un ZIP avec les résultats
-    """
-    try:
-        # Créer un répertoire temporaire
-        temp_dir = tempfile.mkdtemp()
-        zip_path = os.path.join(temp_dir, "fichiers_modifies.zip")
-        
-        with zipfile.ZipFile(zip_path, 'w') as zipf:
-            for file in files:
-                try:
-                    content = await file.read()
-                    filename = file.filename.lower()
-                    
-                    # Lire le fichier
-                    if filename.endswith(('.xlsx', '.xls')):
-                        df = pd.read_excel(io.BytesIO(content))
-                    elif filename.endswith('.csv'):
-                        df = pd.read_csv(io.BytesIO(content))
-                    elif filename.endswith('.json'):
-                        df = pd.read_json(io.BytesIO(content))
-                    else:
-                        continue  # Ignorer les formats non supportés
-                    
-                    # Supprimer les colonnes spécifiées
-                    protected_column = 'ID d\'annotation'
-                    cols_to_drop_filtered = [col for col in colonnes_a_supprimer if col != protected_column]
-                    existing_cols_to_drop = [col for col in cols_to_drop_filtered if col in df.columns]
-                    
-                    if existing_cols_to_drop:
-                        df_modified = df.drop(columns=existing_cols_to_drop)
-                    else:
-                        df_modified = df
-                    
-                    # Ajouter le fichier modifié au ZIP
-                    base_name = Path(file.filename).stem
-                    extension = Path(file.filename).suffix
-                    
-                    if extension in ['.xlsx', '.xls']:
-                        with io.BytesIO() as buffer:
-                            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                                df_modified.to_excel(writer, index=False)
-                            zipf.writestr(f"{base_name}_modifie{extension}", buffer.getvalue())
-                    else:
-                        with io.StringIO() as buffer:
-                            df_modified.to_csv(buffer, index=False)
-                            zipf.writestr(f"{base_name}_modifie.csv", buffer.getvalue().encode('utf-8'))
-                            
-                except Exception:
-                    continue  # Ignorer les fichiers avec erreurs
-        
-        # Nettoyer les fichiers temporaires après envoi
-        def remove_temp_files():
-            import shutil
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        
-        background_tasks.add_task(remove_temp_files)
-        
-        return StreamingResponse(
-            open(zip_path, "rb"),
-            media_type="application/zip",
-            headers={"Content-Disposition": "attachment; filename=fichiers_modifies.zip"}
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression des colonnes: {str(e)}")
-
-@app.get("/sante")
-async def verifier_sante():
-    """Endpoint de vérification de santé de l'API"""
-    return {"statut": "OK", "message": "L'API fonctionne correctement", "timestamp": datetime.now().isoformat()}
-

@@ -11,84 +11,17 @@ from datetime import datetime
 from typing import List
 from PIL import Image
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from app.dependencies import *
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, APIRouter
 from fastapi.responses import StreamingResponse
 import io
 
-app = FastAPI()
+router = APIRouter()
 
 # Fonctions de prétraitement du notebook (adaptées pour l'API)
 
-def anonymize_dicom(dicom_data: pydicom.dataset.FileDataset) -> pydicom.dataset.FileDataset:
-    """Anonymise les données sensibles du fichier DICOM."""
-    tags_to_remove = [
-        (0x0010, 0x0010), (0x0010, 0x0020), (0x0010, 0x0030), (0x0010, 0x0040),
-        (0x0010, 0x1000), (0x0010, 0x1001), (0x0010, 0x2160), (0x0008, 0x0020),
-        (0x0008, 0x0030), (0x0008, 0x0090), (0x0008, 0x1050), (0x0008, 0x1080)
-    ]
-    anonymized_dicom = dicom_data.copy()
-    for tag in tags_to_remove:
-        if tag in anonymized_dicom:
-            del anonymized_dicom[tag]
-    anonymized_dicom.InstitutionName = "Anonymized Healthcare Facility"
-    return anonymized_dicom
-
-def convert_dicom_to_nifti(dicom_data: pydicom.dataset.FileDataset, patient_id: str, study_id: str, series_id: str):
-    """Convertit un fichier DICOM en format NIfTI et extrait les métadonnées."""
-    try:
-        pixel_array = dicom_data.pixel_array
-        nifti_img = nib.Nifti1Image(pixel_array, np.eye(4))
-
-        metadata = {
-            'patient_id': patient_id,
-            'study_id': study_id,
-            'series_id': series_id,
-            'original_sop_instance_uid': str(dicom_data.get('SOPInstanceUID', 'Unknown')),
-            'image_dimensions': pixel_array.shape,
-            'pixel_spacing': [float(i) for i in dicom_data.get('PixelSpacing', [1.0, 1.0])],
-            'modality': str(dicom_data.get('Modality', 'Unknown')),
-            'conversion_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        return {'metadata': metadata, 'nifti_img': nifti_img, 'pixel_array': pixel_array}
-    except Exception as e:
-        print(f"Erreur lors de la conversion en NIfTI : {e}")
-        return None
-
-def resize_image(image_array: np.ndarray, target_size=(256, 256)) -> np.ndarray:
-    """Redimensionne l'image à la taille cible."""
-    if len(image_array.shape) > 2:
-        resized_slices = []
-        for i in range(image_array.shape[0]):
-            img = Image.fromarray(image_array[i].astype(np.float32))
-            img = img.resize(target_size, Image.Resampling.LANCZOS)
-            resized_slices.append(np.array(img))
-        return np.stack(resized_slices, axis=0)
-    else:
-        img = Image.fromarray(image_array.astype(np.float32))
-        img = img.resize(target_size, Image.Resampling.LANCZOS)
-        return np.array(img)
-
-def normalize_image(image_array: np.ndarray) -> np.ndarray:
-    """Normalise les valeurs de pixel de l'image entre 0 et 1."""
-    min_val = np.min(image_array)
-    max_val = np.max(image_array)
-    if max_val - min_val > 0:
-        normalized_image = (image_array - min_val) / (max_val - min_val)
-    else:
-        normalized_image = image_array.astype(np.float32)
-    return normalized_image
-
-def apply_histogram_equalization(image_array: np.ndarray) -> np.ndarray:
-    """Applique l'égalisation d'histogramme à l'image."""
-    if len(image_array.shape) > 2:
-        equalized_slices = []
-        for i in range(image_array.shape[0]):
-            equalized_slices.append(exposure.equalize_hist(image_array[i]))
-        return np.stack(equalized_slices, axis=0)
-    else:
-        return exposure.equalize_hist(image_array)
-
-@app.post("/preprocess_dicom_files/")
+@router.post("/preprocess_dicom_files/")
 async def preprocess_dicom_files(files: List[UploadFile] = File(...)):
     """
     Point de terminaison pour prétraiter un ou plusieurs fichiers DICOM.
