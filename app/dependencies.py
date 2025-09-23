@@ -69,11 +69,12 @@ def anonymize_dicom(dicom_data: pydicom.dataset.FileDataset) -> pydicom.dataset.
     return anonymized_dicom
 
 def convert_dicom_to_nifti(dicom_data: pydicom.dataset.FileDataset, patient_id: str, study_id: str, series_id: str):
-    """Convertit un fichier DICOM en format NIfTI et extrait les métadonnées."""
+    """Convertit un fichier DICOM en format NIfTI et extrait les métadonnées, y compris un .hdr."""
     try:
         pixel_array = dicom_data.pixel_array
         nifti_img = nib.Nifti1Image(pixel_array, np.eye(4))
 
+        # Métadonnées principales
         metadata = {
             'patient_id': patient_id,
             'study_id': study_id,
@@ -84,12 +85,31 @@ def convert_dicom_to_nifti(dicom_data: pydicom.dataset.FileDataset, patient_id: 
             'modality': str(dicom_data.get('Modality', 'Unknown')),
             'conversion_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
-        return {'metadata': metadata, 'nifti_img': nifti_img, 'pixel_array': pixel_array}
+
+        # Extraction de toutes les métadonnées DICOM (hors pixel data)
+        dicom_metadata = {}
+        for elem in dicom_data:
+            if elem.tag != (0x7fe0, 0x0010):  # Pixel Data
+                try:
+                    dicom_metadata[elem.name] = str(elem.value)
+                except Exception:
+                    pass
+
+        # Génération du contenu .hdr (ici en JSON pour la lisibilité)
+        hdr_content = json.dumps(dicom_metadata, indent=2, ensure_ascii=False)
+
+        return {
+            'metadata': metadata,
+            'nifti_img': nifti_img,
+            'pixel_array': pixel_array,
+            'hdr_content': hdr_content  # À sauvegarder comme .hdr si besoin
+        }
     except Exception as e:
         print(f"Erreur lors de la conversion en NIfTI : {e}")
         return None
 
 def resize_image(image_array: np.ndarray, target_size=(256, 256)) -> np.ndarray:
+    
     """Redimensionne l'image à la taille cible."""
     if len(image_array.shape) > 2:
         resized_slices = []
@@ -104,6 +124,7 @@ def resize_image(image_array: np.ndarray, target_size=(256, 256)) -> np.ndarray:
         return np.array(img)
 
 def normalize_image(image_array: np.ndarray) -> np.ndarray:
+    
     """Normalise les valeurs de pixel de l'image entre 0 et 1."""
     min_val = np.min(image_array)
     max_val = np.max(image_array)

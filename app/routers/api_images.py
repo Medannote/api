@@ -13,7 +13,7 @@ from PIL import Image
 
 from app.dependencies import *
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, APIRouter
+from fastapi import FastAPI, Query, UploadFile, File, HTTPException, APIRouter
 from fastapi.responses import StreamingResponse
 import io
 
@@ -22,7 +22,11 @@ router = APIRouter()
 # Fonctions de prétraitement du notebook (adaptées pour l'API)
 
 @router.post("/preprocess_dicom_files/")
-async def preprocess_dicom_files(files: List[UploadFile] = File(...)):
+async def preprocess_dicom_files(
+    files: List[UploadFile] = File(...),
+    n: int = Query(256, description="hauteur de l'image"),
+    m: int = Query(256, description="largeur de l'image")
+      ):
     """
     Point de terminaison pour prétraiter un ou plusieurs fichiers DICOM.
     Anonymise, convertit en NIfTI, redimensionne, normalise, et renvoie une archive ZIP.
@@ -87,7 +91,7 @@ async def preprocess_dicom_files(files: List[UploadFile] = File(...)):
 
         # Appliquer le prétraitement
         try:
-            resized_image = resize_image(image_data, target_size=(256, 256))
+            resized_image = resize_image(image_data, target_size=(n, m))
             normalized_image = normalize_image(resized_image)
             enhanced_image = apply_histogram_equalization(normalized_image)
         except Exception as e:
@@ -108,6 +112,14 @@ async def preprocess_dicom_files(files: List[UploadFile] = File(...)):
         metadata_filepath = os.path.join(metadata_dir, metadata_filename)
         with open(metadata_filepath, 'w') as f:
             json.dump(metadata, f, indent=4)
+
+        # Sauvegarder le fichier .hdr (métadonnées DICOM complètes)
+        hdr_dir = os.path.join(output_base_dir, "metadata_hdr")
+        os.makedirs(hdr_dir, exist_ok=True)
+        hdr_filename = f"metadata_P{patient_counter:03d}_S{study_counter:03d}_SE{series_counter:03d}.hdr"
+        hdr_filepath = os.path.join(hdr_dir, hdr_filename)
+        with open(hdr_filepath, 'w', encoding='utf-8') as f:
+            f.write(conversion_result['hdr_content'])
 
         # Ajouter l'entrée de nomenclature
         nomenclature_entry = {
