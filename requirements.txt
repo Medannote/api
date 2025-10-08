@@ -60,5 +60,8 @@ typing_extensions==4.15.0
 tzdata==2025.2
 urllib3==2.5.0
 uvicorn==0.35.0
+wfdb==4.1.2
 websockets==15.0.1
 zope.interface==7.2
+openpyxl==3.1.5
+matplotlib==3.9.2

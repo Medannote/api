@@ -68,6 +68,9 @@ async def analyser_documents(files: List[UploadFile] = File(...)):
     """
     Analyse plusieurs documents médicaux (DOCX ou TXT) et extrait les informations
     """
+    # Validate uploaded files
+    await validate_file_upload(files, allowed_extensions=ALLOWED_TEXT_EXTENSIONS)
+
     try:
         all_data = []
         results = []
@@ -122,6 +125,9 @@ async def generer_annotations(files: List[UploadFile] = File(...)):
     """
     Génère des annotations pour plusieurs fichiers de données médicales
     """
+    # Validate uploaded files
+    await validate_file_upload(files, allowed_extensions=ALLOWED_TEXT_EXTENSIONS)
+
     try:
         all_dfs = []
         results = []
@@ -196,6 +202,9 @@ async def telecharger_annotations_zip(background_tasks: BackgroundTasks, files: 
     """
     Génère des annotations pour plusieurs fichiers et retourne un ZIP avec les résultats
     """
+    # Validate uploaded files
+    await validate_file_upload(files, allowed_extensions=ALLOWED_TEXT_EXTENSIONS)
+
     try:
         all_dfs = []
         
@@ -258,6 +267,9 @@ async def supprimer_colonnes_zip(
     """
     Supprime des colonnes de plusieurs fichiers et retourne un ZIP avec les résultats
     """
+    # Validate uploaded files
+    await validate_file_upload(files, allowed_extensions=ALLOWED_TEXT_EXTENSIONS)
+
     try:
         # Créer un répertoire temporaire
         temp_dir = tempfile.mkdtemp()

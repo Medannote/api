@@ -26,18 +26,21 @@ async def root():
         "message": "API de Traitement de Signaux Médicaux",
         "version": "1.0.0",
         "endpoints": {
-            "metadata": "GET /metadata/{signal_name} - Récupère les métadonnées d'un signal",
-            "plot_signal": "GET /plot/{signal_name} - Génère un graphique du signal",
+            "metadata": "POST /metadata/ - Récupère les métadonnées d'un signal",
+            "plot_signal": "POST /plot/ - Génère un graphique du signal",
             "process_folder": "POST /process_folder - Traite tous les signaux d'un dossier",
             "download_metadata": "POST /download_metadata - Télécharge les métadonnées en format CSV"
         }
     }
 
-@router.get("/metadata/")
+@router.post("/metadata/")
 async def get_metadata(background_tasks: BackgroundTasks, signal_name: str, files: List[UploadFile] = File(...)):
     """
     Récupère les métadonnées d'un signal spécifique à partir de fichiers uploadés
     """
+    # Validate uploaded files
+    await validate_file_upload(files, allowed_extensions=ALLOWED_SIGNAL_EXTENSIONS)
+
     try:
         temp_dir = tempfile.mkdtemp()
         for file in files:
@@ -57,11 +60,14 @@ async def get_metadata(background_tasks: BackgroundTasks, signal_name: str, file
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/plot/")
+@router.post("/plot/")
 async def get_signal_plot(background_tasks: BackgroundTasks, signal_name: str, files: List[UploadFile] = File(...)):
     """
     Génère et retourne un graphique du signal spécifié à partir de fichiers uploadés
     """
+    # Validate uploaded files
+    await validate_file_upload(files, allowed_extensions=ALLOWED_SIGNAL_EXTENSIONS)
+
     try:
         temp_dir = tempfile.mkdtemp()
         for file in files:
@@ -90,6 +96,9 @@ async def process_folder(background_tasks: BackgroundTasks, files: List[UploadFi
     """
     Traite tous les signaux uploadés et retourne les métadonnées
     """
+    # Validate uploaded files
+    await validate_file_upload(files, allowed_extensions=ALLOWED_SIGNAL_EXTENSIONS)
+
     try:
         temp_dir = tempfile.mkdtemp()
         for file in files:
@@ -119,6 +128,9 @@ async def download_metadata(background_tasks: BackgroundTasks, files: List[Uploa
     """
     Télécharge toutes les métadonnées des signaux uploadés sous forme de fichiers CSV dans un ZIP
     """
+    # Validate uploaded files
+    await validate_file_upload(files, allowed_extensions=ALLOWED_SIGNAL_EXTENSIONS)
+
     try:
         temp_dir = tempfile.mkdtemp()
         for file in files:
@@ -156,13 +168,18 @@ async def download_metadata(background_tasks: BackgroundTasks, files: List[Uploa
 """
             zipf.writestr("README.md", readme_content)
 
+        # Lire le fichier ZIP en mémoire
+        with open(zip_path, "rb") as f:
+            zip_data = io.BytesIO(f.read())
+        zip_data.seek(0)
+
         def remove_temp_files():
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
         background_tasks.add_task(remove_temp_files)
 
         return StreamingResponse(
-            open(zip_path, "rb"),
+            zip_data,
             media_type="application/zip",
             headers={"Content-Disposition": "attachment; filename=metadata_signaux_medicaux.zip"}
         )
@@ -174,6 +191,9 @@ async def upload_signals(background_tasks: BackgroundTasks, files: List[UploadFi
     """
     Upload de fichiers de signaux médicaux (.hea et .dat) et traitement
     """
+    # Validate uploaded files
+    await validate_file_upload(files, allowed_extensions=ALLOWED_SIGNAL_EXTENSIONS)
+
     try:
         # Créer un répertoire temporaire
         temp_dir = tempfile.mkdtemp()

@@ -8,39 +8,80 @@ from skimage import exposure
 import shutil
 import json
 from datetime import datetime
-from typing import List
+from typing import List, Dict, Optional, Union
 from PIL import Image
-
 import wfdb
-import pandas as pd
-import os
-import numpy as np
 import glob
 import uuid
 import tempfile
 import zipfile
 import io
-from typing import List, Dict, Optional
 from pathlib import Path
-
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, BackgroundTasks, APIRouter
-from fastapi.responses import JSONResponse, StreamingResponse
-import pandas as pd
 from collections import Counter
 import docx as python_docx
 from docx import Document
-import os
 import re
-import docx
-from typing import Dict, List, Optional, Union
 import nltk
-from datetime import datetime
-import json
-import io
-import zipfile
-import tempfile
-from pathlib import Path
 from pydantic import BaseModel
+import matplotlib.pyplot as plt
+import logging
+
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, BackgroundTasks, APIRouter
+from fastapi.responses import JSONResponse, StreamingResponse
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configuration constants
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB per file
+MAX_FILES = 50  # Maximum number of files per request
+ALLOWED_DICOM_EXTENSIONS = {'.dcm', '.dicom'}
+ALLOWED_SIGNAL_EXTENSIONS = {'.hea', '.dat'}
+ALLOWED_TEXT_EXTENSIONS = {'.docx', '.txt', '.xlsx', '.xls', '.csv', '.json'}
+
+# Validation functions
+async def validate_file_upload(files: List[UploadFile], max_files: int = MAX_FILES, max_size: int = MAX_FILE_SIZE, allowed_extensions: set = None):
+    """
+    Validate uploaded files for size, count, and extension.
+
+    Args:
+        files: List of uploaded files
+        max_files: Maximum number of files allowed
+        max_size: Maximum size per file in bytes
+        allowed_extensions: Set of allowed file extensions (with dot, e.g., {'.dcm', '.txt'})
+
+    Raises:
+        HTTPException: If validation fails
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="Aucun fichier n'a été téléchargé.")
+
+    if len(files) > max_files:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Trop de fichiers. Maximum autorisé : {max_files}, reçu : {len(files)}"
+        )
+
+    for file in files:
+        # Check file size by reading content
+        content = await file.read()
+        await file.seek(0)  # Reset file pointer
+
+        if len(content) > max_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Fichier '{file.filename}' trop volumineux. Taille maximale : {max_size / (1024*1024):.1f}MB"
+            )
+
+        # Check file extension if specified
+        if allowed_extensions:
+            file_ext = os.path.splitext(file.filename)[1].lower()
+            if file_ext not in allowed_extensions:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Extension de fichier non autorisée : '{file_ext}'. Extensions autorisées : {', '.join(allowed_extensions)}"
+                )
 
 # Télécharger les stopwords NLTK au démarrage
 try:
@@ -106,6 +147,7 @@ def convert_dicom_to_nifti(dicom_data: pydicom.dataset.FileDataset, patient_id: 
         }
     except Exception as e:
         print(f"Erreur lors de la conversion en NIfTI : {e}")
+        logger.error(f"Erreur lors de la conversion en NIfTI : {e}")
         return None
 
 def resize_image(image_array: np.ndarray, target_size=(256, 256)) -> np.ndarray:
