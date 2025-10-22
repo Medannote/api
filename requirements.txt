@@ -42,7 +42,7 @@ pandas==2.3.2
 pillow==11.3.0
 postgrest==1.1.1
 propcache==0.4.1
-psycopg2==2.9.10
+psycopg2-binary==2.9.10
 pycparser==2.23
 pydantic==2.11.7
 pydantic_core==2.33.2
