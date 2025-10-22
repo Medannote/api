@@ -7,6 +7,7 @@ from skimage.transform import resize
 from skimage import exposure
 import shutil
 import json
+import base64
 from datetime import datetime
 from typing import List
 from PIL import Image
@@ -168,3 +169,73 @@ async def preprocess_dicom_files(
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename={os.path.basename(zip_file_path)}"}
     )
+
+
+@router.post("/convert_dicom_for_viewer")
+async def convert_dicom_for_viewer(file: UploadFile = File(...)):
+    """
+    Convert DICOM file to viewable format with metadata for the data viewer.
+    Returns JSON with image data and metadata instead of ZIP.
+    """
+    try:
+        # Read DICOM file
+        content = await file.read()
+        dicom_dataset = pydicom.dcmread(io.BytesIO(content))
+
+        # Extract pixel data
+        pixel_array = dicom_dataset.pixel_array
+
+        # Normalize to 8-bit for display
+        if pixel_array.max() > 255:
+            pixel_array = ((pixel_array - pixel_array.min()) /
+                          (pixel_array.max() - pixel_array.min()) * 255).astype(np.uint8)
+        else:
+            pixel_array = pixel_array.astype(np.uint8)
+
+        # Convert to PIL Image
+        if len(pixel_array.shape) == 2:
+            # Grayscale
+            image = Image.fromarray(pixel_array, mode='L')
+        else:
+            # RGB
+            image = Image.fromarray(pixel_array, mode='RGB')
+
+        # Convert to base64 PNG
+        buffer = io.BytesIO()
+        image.save(buffer, format='PNG')
+        buffer.seek(0)
+        image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        image_data_url = f"data:image/png;base64,{image_base64}"
+
+        # Extract metadata
+        metadata = {
+            'patient_name': str(getattr(dicom_dataset, 'PatientName', 'Unknown')),
+            'patient_id': str(getattr(dicom_dataset, 'PatientID', 'Unknown')),
+            'patient_birth_date': str(getattr(dicom_dataset, 'PatientBirthDate', 'Unknown')),
+            'patient_sex': str(getattr(dicom_dataset, 'PatientSex', 'Unknown')),
+            'modality': str(getattr(dicom_dataset, 'Modality', 'Unknown')),
+            'body_part': str(getattr(dicom_dataset, 'BodyPartExamined', 'Unknown')),
+            'study_date': str(getattr(dicom_dataset, 'StudyDate', 'Unknown')),
+            'study_time': str(getattr(dicom_dataset, 'StudyTime', 'Unknown')),
+            'study_description': str(getattr(dicom_dataset, 'StudyDescription', 'Unknown')),
+            'series_description': str(getattr(dicom_dataset, 'SeriesDescription', 'Unknown')),
+            'institution': str(getattr(dicom_dataset, 'InstitutionName', 'Unknown')),
+            'manufacturer': str(getattr(dicom_dataset, 'Manufacturer', 'Unknown')),
+            'rows': int(getattr(dicom_dataset, 'Rows', 0)),
+            'columns': int(getattr(dicom_dataset, 'Columns', 0)),
+            'pixel_spacing': str(getattr(dicom_dataset, 'PixelSpacing', 'Unknown')),
+            'slice_thickness': str(getattr(dicom_dataset, 'SliceThickness', 'Unknown')),
+        }
+
+        return {
+            'success': True,
+            'image_data': image_data_url,
+            'metadata': metadata,
+            'original_filename': file.filename
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error converting DICOM: {str(e)}"
+        )

@@ -306,15 +306,21 @@ async def supprimer_colonnes_zip(
                 except Exception:
                     continue  # Ignorer les fichiers avec erreurs
         
+        # Read ZIP into memory to avoid file handle leak
+        zip_buffer = io.BytesIO()
+        with open(zip_path, "rb") as f:
+            zip_buffer.write(f.read())
+        zip_buffer.seek(0)
+
         # Nettoyer les fichiers temporaires après envoi
         def remove_temp_files():
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
-        
+
         background_tasks.add_task(remove_temp_files)
-        
+
         return StreamingResponse(
-            open(zip_path, "rb"),
+            zip_buffer,
             media_type="application/zip",
             headers={"Content-Disposition": "attachment; filename=fichiers_modifies.zip"}
         )
