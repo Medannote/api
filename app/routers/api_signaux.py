@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
 
-
+import logging
 import wfdb
 import pandas as pd
 import os
@@ -11,8 +11,11 @@ import uuid
 import tempfile
 import zipfile
 import io
+import shutil
 from typing import List, Dict, Optional
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from app.dependencies import *
 
@@ -168,10 +171,11 @@ async def download_metadata(background_tasks: BackgroundTasks, files: List[Uploa
 """
             zipf.writestr("README.md", readme_content)
 
-        # Lire le fichier ZIP en mémoire
+        # Read ZIP into memory to avoid file handle leak
+        zip_buffer = io.BytesIO()
         with open(zip_path, "rb") as f:
-            zip_data = io.BytesIO(f.read())
-        zip_data.seek(0)
+            zip_buffer.write(f.read())
+        zip_buffer.seek(0)
 
         def remove_temp_files():
             import shutil
@@ -179,12 +183,105 @@ async def download_metadata(background_tasks: BackgroundTasks, files: List[Uploa
         background_tasks.add_task(remove_temp_files)
 
         return StreamingResponse(
-            zip_data,
+            zip_buffer,
             media_type="application/zip",
             headers={"Content-Disposition": "attachment; filename=metadata_signaux_medicaux.zip"}
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/convert_signal_for_viewer")
+async def convert_signal_for_viewer(files: List[UploadFile] = File(...)):
+    """
+    Convert signal files (ECG/EEG) to viewable format with metadata for the data viewer.
+    Returns JSON with signal data points and metadata instead of ZIP.
+    """
+    try:
+        # Create temp directory
+        temp_dir = tempfile.mkdtemp()
+
+        # Save uploaded files
+        for file in files:
+            file_path = os.path.join(temp_dir, file.filename)
+            with open(file_path, "wb") as f:
+                content = await file.read()
+                f.write(content)
+
+        # Process signals using existing function
+        personal_df, medical_df = division_df(temp_dir)
+
+        # Extract signal data from files
+        signal_data = []
+        metadata = {}
+
+        # Find .hea file for metadata
+        hea_files = glob.glob(os.path.join(temp_dir, "*.hea"))
+        if hea_files:
+            import wfdb
+            record_name = os.path.splitext(os.path.basename(hea_files[0]))[0]
+            record_path = os.path.join(temp_dir, record_name)
+
+            try:
+                # Read signal
+                record = wfdb.rdrecord(record_path)
+
+                # Extract signal data (first channel for now, can be expanded)
+                if record.p_signal is not None and len(record.p_signal) > 0:
+                    # Take first channel
+                    signal = record.p_signal[:, 0]
+
+                    # Downsample if too many points (for performance)
+                    max_points = 5000
+                    if len(signal) > max_points:
+                        step = len(signal) // max_points
+                        signal = signal[::step]
+
+                    # Convert to list of [x, y] pairs
+                    signal_data = [[i, float(val)] for i, val in enumerate(signal)]
+
+                    # Extract metadata
+                    metadata = {
+                        'record_name': record.record_name,
+                        'sampling_frequency': float(record.fs) if record.fs else 0,
+                        'duration': float(record.sig_len / record.fs) if record.fs else 0,
+                        'n_signals': int(record.n_sig) if record.n_sig else 0,
+                        'signal_names': record.sig_name if record.sig_name else [],
+                        'units': record.units if record.units else [],
+                        'comments': record.comments if record.comments else []
+                    }
+
+            except Exception as e:
+                logger.error(f"Error reading WFDB signal: {e}")
+                # Return empty signal if error
+                signal_data = []
+                metadata = {'error': str(e)}
+
+        # Cleanup
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        if not signal_data:
+            return {
+                'success': False,
+                'message': 'No signal data could be extracted',
+                'signal_data': [],
+                'metadata': metadata
+            }
+
+        return {
+            'success': True,
+            'signal_data': signal_data,
+            'metadata': metadata,
+            'original_filenames': [f.filename for f in files]
+        }
+
+    except Exception as e:
+        logger.error(f"Error converting signal: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error converting signal: {str(e)}"
+        )
+
 
 @router.post("/upload_signals")
 async def upload_signals(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
