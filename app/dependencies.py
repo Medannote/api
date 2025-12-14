@@ -64,6 +64,13 @@ async def validate_file_upload(files: List[UploadFile], max_files: int = MAX_FIL
         )
 
     for file in files:
+        # Sanitize filename to prevent path traversal
+        if not file.filename or ".." in file.filename or "/" in file.filename or "\\" in file.filename:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Nom de fichier invalide : '{file.filename}'"
+            )
+        
         # Check file size by reading content
         content = await file.read()
         await file.seek(0)  # Reset file pointer
@@ -72,6 +79,13 @@ async def validate_file_upload(files: List[UploadFile], max_files: int = MAX_FIL
             raise HTTPException(
                 status_code=400,
                 detail=f"Fichier '{file.filename}' trop volumineux. Taille maximale : {max_size / (1024*1024):.1f}MB"
+            )
+        
+        # Check for empty files
+        if len(content) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Fichier '{file.filename}' est vide."
             )
 
         # Check file extension if specified

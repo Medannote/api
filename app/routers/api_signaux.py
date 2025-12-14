@@ -91,8 +91,14 @@ async def get_signal_plot(background_tasks: BackgroundTasks, signal_name: str, f
             media_type="image/png",
             headers={"Content-Disposition": f"attachment; filename={signal_name}_plot.png"}
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error plotting signal: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur lors de la génération du graphique."
+        )
 
 @router.post("/process_folder")
 async def process_folder(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
@@ -123,8 +129,14 @@ async def process_folder(background_tasks: BackgroundTasks, files: List[UploadFi
             "medical_metadata": medical_df.to_dict(orient='records'),
             "full_metadata": df.to_dict(orient='records')
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error processing folder: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur lors du traitement des signaux."
+        )
 
 @router.post("/download_metadata")
 async def download_metadata(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
@@ -187,8 +199,21 @@ async def download_metadata(background_tasks: BackgroundTasks, files: List[Uploa
             media_type="application/zip",
             headers={"Content-Disposition": "attachment; filename=metadata_signaux_medicaux.zip"}
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error downloading metadata: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur lors de la génération du fichier ZIP."
+        )
+    finally:
+        # Always cleanup temp directory
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as cleanup_error:
+                logger.error(f"Failed to cleanup temp directory: {cleanup_error}")
 
 
 @router.post("/convert_signal_for_viewer")
@@ -275,11 +300,13 @@ async def convert_signal_for_viewer(files: List[UploadFile] = File(...)):
             'original_filenames': [f.filename for f in files]
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error converting signal: {e}")
+        logger.error(f"Error converting signal for viewer: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Error converting signal: {str(e)}"
+            detail="Erreur lors de la conversion du signal."
         )
 
 

@@ -174,10 +174,11 @@ async def process_file_category(
         (success, zip_bytes, error_message)
     """
     try:
+        # Use v1 API endpoints for consistency
         endpoint_map = {
-            'images': '/images/preprocess_dicom_files/',
-            'signals': '/signaux/upload_signals',
-            'text': '/text/telecharger_annotations_zip/'
+            'images': '/api/v1/images/preprocess_dicom_files/',
+            'signals': '/api/v1/signaux/upload_signals',
+            'text': '/api/v1/text/telecharger_annotations_zip/'
         }
 
         endpoint = endpoint_map.get(category)
@@ -289,9 +290,9 @@ async def process_batch_zip(
                 detail=f"Aucun fichier traitable trouvé. Fichiers non reconnus: {len(categorized['unknown'])}"
             )
 
-        # Get API base URL - since we're calling from within FastAPI, use localhost:8000
-        # (the batch endpoint calls other endpoints on the same FastAPI instance)
-        api_base_url = 'http://localhost:8000'
+        # Get API base URL from environment or construct from request
+        # Use the same host/port that received this request
+        api_base_url = os.getenv('API_BASE_URL', 'http://localhost:8000')
 
         # Process each category
         results = {}
@@ -389,17 +390,20 @@ async def process_batch_zip(
         )
 
     except HTTPException:
-        # Re-raise HTTP exceptions
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
         raise
     except Exception as e:
-        # Cleanup on error
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
         logger.error(f"Batch processing error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Erreur lors du traitement: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur lors du traitement du fichier ZIP."
+        )
+    finally:
+        # Always cleanup temp directory
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as cleanup_error:
+                logger.error(f"Failed to cleanup temp directory: {cleanup_error}")
 
 
 @router.get("/")

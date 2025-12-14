@@ -117,8 +117,14 @@ async def analyser_documents(files: List[UploadFile] = File(...)):
             "donnees_combinees": df_combined.to_dict('records')
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse des documents: {str(e)}")
+        logger.error(f"Error analyzing documents: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur lors de l'analyse des documents."
+        )
 
 @router.post("/generer_annotations")
 async def generer_annotations(files: List[UploadFile] = File(...)):
@@ -194,8 +200,14 @@ async def generer_annotations(files: List[UploadFile] = File(...)):
             "df_medical_combine": df2_combined.to_dict('records') if df2_combined is not None else []
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la génération d'annotations: {str(e)}")
+        logger.error(f"Error generating annotations: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur lors de la génération d'annotations."
+        )
 
 @router.post("/telecharger_annotations_zip")
 async def telecharger_annotations_zip(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
@@ -255,8 +267,14 @@ async def telecharger_annotations_zip(background_tasks: BackgroundTasks, files: 
             headers={"Content-Disposition": "attachment; filename=annotations_medicales.zip"}
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la génération du ZIP: {str(e)}")
+        logger.error(f"Error generating ZIP: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur lors de la génération du fichier ZIP."
+        )
 
 @router.post("/supprimer_colonnes_zip")
 async def supprimer_colonnes_zip(
@@ -270,9 +288,10 @@ async def supprimer_colonnes_zip(
     # Validate uploaded files
     await validate_file_upload(files, allowed_extensions=ALLOWED_TEXT_EXTENSIONS)
 
+    # Créer un répertoire temporaire
+    temp_dir = tempfile.mkdtemp()
+    
     try:
-        # Créer un répertoire temporaire
-        temp_dir = tempfile.mkdtemp()
         zip_path = os.path.join(temp_dir, "fichiers_modifies.zip")
         
         with zipfile.ZipFile(zip_path, 'w') as zipf:
@@ -337,8 +356,21 @@ async def supprimer_colonnes_zip(
             headers={"Content-Disposition": "attachment; filename=fichiers_modifies.zip"}
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression des colonnes: {str(e)}")
+        logger.error(f"Error removing columns: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Erreur lors de la suppression des colonnes."
+        )
+    finally:
+        # Always cleanup temp directory
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as cleanup_error:
+                logger.error(f"Failed to cleanup temp directory: {cleanup_error}")
 
 @router.get("/sante")
 async def verifier_sante():
