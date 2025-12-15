@@ -1510,4 +1510,4 @@ Pour toute question ou suggestion, consultez la documentation interactive à `/d
 **Dernière mise à jour** : 14 décembre 2025  
 **Version de l'API** : 2.0.0  
 **Framework** : FastAPI  
-**Auteur** : Équipe API Médicale
+**Auteur** : Équipe MedAnnote
