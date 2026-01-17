@@ -1,4 +1,9 @@
 import os
+
+# Configure matplotlib for headless/serverless environments BEFORE importing
+os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib'
+os.environ['MPLBACKEND'] = 'Agg'
+
 import pydicom
 import nibabel as nib
 import numpy as np
@@ -23,6 +28,8 @@ from docx import Document
 import re
 import nltk
 from pydantic import BaseModel
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import logging
 
