@@ -1,16 +1,9 @@
 import os
-import pydicom
-import nibabel as nib
-import numpy as np
-import pandas as pd
-from skimage.transform import resize
-from skimage import exposure
 import shutil
 import json
 import base64
 from datetime import datetime
 from typing import List
-from PIL import Image
 import tempfile
 import zipfile
 import io
@@ -61,6 +54,7 @@ async def preprocess_dicom_files(
                 raise HTTPException(status_code=500, detail=f"Erreur lors de la sauvegarde du fichier : {file.filename}.")
 
             try:
+                pydicom = get_pydicom()
                 dicom_data = pydicom.dcmread(temp_dicom_path)
             except Exception:
                 os.remove(temp_dicom_path)
@@ -101,6 +95,7 @@ async def preprocess_dicom_files(
                 raise HTTPException(status_code=500, detail=f"Erreur lors du prétraitement de l'image {file.filename} : {e}")
 
             # Sauvegarder l'image prétraitée
+            nib = get_nibabel()
             processed_nifti = nib.Nifti1Image(enhanced_image, nifti_img.affine)
             images_dir = os.path.join(output_base_dir, "images")
             os.makedirs(images_dir, exist_ok=True)
@@ -272,6 +267,7 @@ def _process_dicom_background(job_id: str, files: List[tuple], temp_upload_dir: 
             )
             
             try:
+                pydicom = get_pydicom()
                 dicom_data = pydicom.dcmread(file_path)
             except Exception:
                 logger.warning(f"Skipping invalid DICOM file: {filename}")
@@ -309,6 +305,7 @@ def _process_dicom_background(job_id: str, files: List[tuple], temp_upload_dir: 
             enhanced_image = apply_histogram_equalization(normalized_image)
             
             # Save processed image
+            nib = get_nibabel()
             processed_nifti = nib.Nifti1Image(enhanced_image, nifti_img.affine)
             images_dir = os.path.join(output_base_dir, "images")
             os.makedirs(images_dir, exist_ok=True)
@@ -354,6 +351,7 @@ def _process_dicom_background(job_id: str, files: List[tuple], temp_upload_dir: 
         job_tracker.update_status(job_id, JobStatus.PROCESSING, progress=85, message="Création du fichier de nomenclature...")
         csv_dir = os.path.join(output_base_dir, "csv_files")
         os.makedirs(csv_dir, exist_ok=True)
+        pd = get_pandas()
         df = pd.DataFrame(nomenclature_entries)
         csv_filename = os.path.join(csv_dir, "nomenclature_mapping.csv")
         df.to_csv(csv_filename, index=False)
@@ -422,12 +420,14 @@ async def convert_dicom_for_viewer(file: UploadFile = File(...)):
     try:
         # Read DICOM file
         content = await file.read()
+        pydicom = get_pydicom()
         dicom_dataset = pydicom.dcmread(io.BytesIO(content))
 
         # Extract pixel data
         pixel_array = dicom_dataset.pixel_array
 
         # Normalize to 8-bit for display
+        np = get_numpy()
         if pixel_array.max() > 255:
             pixel_array = ((pixel_array - pixel_array.min()) /
                           (pixel_array.max() - pixel_array.min()) * 255).astype(np.uint8)
@@ -435,6 +435,7 @@ async def convert_dicom_for_viewer(file: UploadFile = File(...)):
             pixel_array = pixel_array.astype(np.uint8)
 
         # Convert to PIL Image
+        Image = get_PIL_Image()
         if len(pixel_array.shape) == 2:
             # Grayscale
             image = Image.fromarray(pixel_array, mode='L')

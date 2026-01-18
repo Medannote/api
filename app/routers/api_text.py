@@ -1,14 +1,9 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, BackgroundTasks, APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
-import pandas as pd
 from collections import Counter
-import docx as python_docx
-from docx import Document
 import os
 import re
-import docx
 from typing import Dict, List, Optional, Union
-import nltk
 from datetime import datetime
 import json
 import io
@@ -16,13 +11,6 @@ import zipfile
 import tempfile
 from pathlib import Path
 from pydantic import BaseModel
-
-# Télécharger les stopwords NLTK au démarrage
-try:
-    from nltk.corpus import stopwords
-    nltk.download('stopwords', quiet=True)
-except:
-    pass
 
 from app.dependencies import *
 
@@ -109,6 +97,7 @@ async def analyser_documents(files: List[UploadFile] = File(...)):
                     "error": str(e)
                 })
         
+        pd = get_pandas()
         df_combined = pd.DataFrame(all_data) if all_data else pd.DataFrame()
         
         return {
@@ -190,6 +179,7 @@ async def generer_annotations(files: List[UploadFile] = File(...)):
                 })
         
         # Combiner tous les DataFrames
+        pd = get_pandas()
         df_combined = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
         df1_combined, df2_combined = Annotation(df_combined)
         
@@ -226,6 +216,7 @@ async def telecharger_annotations_zip(background_tasks: BackgroundTasks, files: 
                 filename = file.filename.lower()
                 
                 # Lire le fichier selon son type
+                pd = get_pandas()
                 if filename.endswith('.docx'):
                     lignes = extract_text_from_docx(content)
                     donnees = parse_report(lignes)
@@ -255,6 +246,7 @@ async def telecharger_annotations_zip(background_tasks: BackgroundTasks, files: 
             raise HTTPException(status_code=400, detail="Aucun fichier valide à traiter")
         
         # Combiner tous les DataFrames et générer les annotations
+        pd = get_pandas()
         df_combined = pd.concat(all_dfs, ignore_index=True)
         df1_combined, df2_combined = Annotation(df_combined)
         
@@ -301,6 +293,7 @@ async def supprimer_colonnes_zip(
                     filename = file.filename.lower()
                     
                     # Lire le fichier
+                    pd = get_pandas()
                     if filename.endswith(('.xlsx', '.xls')):
                         df = pd.read_excel(io.BytesIO(content))
                     elif filename.endswith('.csv'):
@@ -326,6 +319,7 @@ async def supprimer_colonnes_zip(
                     
                     if extension in ['.xlsx', '.xls']:
                         with io.BytesIO() as buffer:
+                            pd = get_pandas()
                             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                                 df_modified.to_excel(writer, index=False)
                             zipf.writestr(f"{base_name}_modifie{extension}", buffer.getvalue())

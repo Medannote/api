@@ -2,10 +2,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, A
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import logging
-import wfdb
-import pandas as pd
 import os
-import numpy as np
 import glob
 import uuid
 import tempfile
@@ -243,7 +240,7 @@ async def convert_signal_for_viewer(files: List[UploadFile] = File(...)):
         # Find .hea file for metadata
         hea_files = glob.glob(os.path.join(temp_dir, "*.hea"))
         if hea_files:
-            import wfdb
+            wfdb = get_wfdb()
             record_name = os.path.splitext(os.path.basename(hea_files[0]))[0]
             record_path = os.path.join(temp_dir, record_name)
 

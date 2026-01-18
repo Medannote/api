@@ -4,18 +4,11 @@ import os
 os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib'
 os.environ['MPLBACKEND'] = 'Agg'
 
-import pydicom
-import nibabel as nib
-import numpy as np
-import pandas as pd
-from skimage.transform import resize
-from skimage import exposure
+# Lightweight imports only - heavy libraries are lazy-loaded
 import shutil
 import json
 from datetime import datetime
-from typing import List, Dict, Optional, Union
-from PIL import Image
-import wfdb
+from typing import List, Dict, Optional, Union, TYPE_CHECKING
 import glob
 import uuid
 import tempfile
@@ -23,15 +16,9 @@ import zipfile
 import io
 from pathlib import Path
 from collections import Counter
-import docx as python_docx
-from docx import Document
 import re
-import nltk
-from pydantic import BaseModel
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
-import matplotlib.pyplot as plt
 import logging
+from pydantic import BaseModel
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, BackgroundTasks, APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -39,6 +26,101 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Lazy-loaded heavy modules (cached after first import)
+_pydicom = None
+_nibabel = None
+_numpy = None
+_pandas = None
+_skimage_transform = None
+_skimage_exposure = None
+_PIL_Image = None
+_wfdb = None
+_docx = None
+_Document = None
+_nltk = None
+_matplotlib_plt = None
+
+def get_pydicom():
+    global _pydicom
+    if _pydicom is None:
+        import pydicom
+        _pydicom = pydicom
+    return _pydicom
+
+def get_nibabel():
+    global _nibabel
+    if _nibabel is None:
+        import nibabel as nib
+        _nibabel = nib
+    return _nibabel
+
+def get_numpy():
+    global _numpy
+    if _numpy is None:
+        import numpy as np
+        _numpy = np
+    return _numpy
+
+def get_pandas():
+    global _pandas
+    if _pandas is None:
+        import pandas as pd
+        _pandas = pd
+    return _pandas
+
+def get_skimage_transform():
+    global _skimage_transform
+    if _skimage_transform is None:
+        from skimage import transform
+        _skimage_transform = transform
+    return _skimage_transform
+
+def get_skimage_exposure():
+    global _skimage_exposure
+    if _skimage_exposure is None:
+        from skimage import exposure
+        _skimage_exposure = exposure
+    return _skimage_exposure
+
+def get_PIL_Image():
+    global _PIL_Image
+    if _PIL_Image is None:
+        from PIL import Image
+        _PIL_Image = Image
+    return _PIL_Image
+
+def get_wfdb():
+    global _wfdb
+    if _wfdb is None:
+        import wfdb
+        _wfdb = wfdb
+    return _wfdb
+
+def get_docx():
+    global _docx, _Document
+    if _docx is None:
+        import docx as python_docx
+        from docx import Document
+        _docx = python_docx
+        _Document = Document
+    return _docx, _Document
+
+def get_nltk():
+    global _nltk
+    if _nltk is None:
+        import nltk
+        _nltk = nltk
+    return _nltk
+
+def get_matplotlib_plt():
+    global _matplotlib_plt
+    if _matplotlib_plt is None:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        _matplotlib_plt = plt
+    return _matplotlib_plt
 
 # Configuration constants
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB per file
@@ -104,19 +186,27 @@ async def validate_file_upload(files: List[UploadFile], max_files: int = MAX_FIL
                     detail=f"Extension de fichier non autorisée : '{file_ext}'. Extensions autorisées : {', '.join(allowed_extensions)}"
                 )
 
-# Télécharger les stopwords NLTK au démarrage
-try:
-    from nltk.corpus import stopwords
-    nltk.download('stopwords', quiet=True)
-except:
-    pass
+# NLTK stopwords loaded lazily when needed
+_stopwords_cache = None
+
+def get_stopwords():
+    global _stopwords_cache
+    if _stopwords_cache is None:
+        nltk = get_nltk()
+        try:
+            nltk.download('stopwords', quiet=True)
+            from nltk.corpus import stopwords
+            _stopwords_cache = set(stopwords.words('french'))
+        except:
+            _stopwords_cache = set()
+    return _stopwords_cache
 
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, APIRouter
 from fastapi.responses import StreamingResponse
 import io
 
-def anonymize_dicom(dicom_data: pydicom.dataset.FileDataset) -> pydicom.dataset.FileDataset:
+def anonymize_dicom(dicom_data):
     """Anonymise les données sensibles du fichier DICOM."""
     tags_to_remove = [
         (0x0010, 0x0010), (0x0010, 0x0020), (0x0010, 0x0030), (0x0010, 0x0040),
@@ -130,8 +220,10 @@ def anonymize_dicom(dicom_data: pydicom.dataset.FileDataset) -> pydicom.dataset.
     anonymized_dicom.InstitutionName = "Anonymized Healthcare Facility"
     return anonymized_dicom
 
-def convert_dicom_to_nifti(dicom_data: pydicom.dataset.FileDataset, patient_id: str, study_id: str, series_id: str):
+def convert_dicom_to_nifti(dicom_data, patient_id: str, study_id: str, series_id: str):
     """Convertit un fichier DICOM en format NIfTI et extrait les métadonnées, y compris un .hdr."""
+    nib = get_nibabel()
+    np = get_numpy()
     try:
         pixel_array = dicom_data.pixel_array
         nifti_img = nib.Nifti1Image(pixel_array, np.eye(4))
@@ -171,9 +263,11 @@ def convert_dicom_to_nifti(dicom_data: pydicom.dataset.FileDataset, patient_id: 
         logger.error(f"Erreur lors de la conversion en NIfTI : {e}")
         return None
 
-def resize_image(image_array: np.ndarray, target_size=(256, 256)) -> np.ndarray:
+def resize_image(image_array, target_size=(256, 256)):
     
     """Redimensionne l'image à la taille cible."""
+    np = get_numpy()
+    Image = get_PIL_Image()
     if len(image_array.shape) > 2:
         resized_slices = []
         for i in range(image_array.shape[0]):
@@ -186,9 +280,10 @@ def resize_image(image_array: np.ndarray, target_size=(256, 256)) -> np.ndarray:
         img = img.resize(target_size, Image.Resampling.LANCZOS)
         return np.array(img)
 
-def normalize_image(image_array: np.ndarray) -> np.ndarray:
+def normalize_image(image_array):
     
     """Normalise les valeurs de pixel de l'image entre 0 et 1."""
+    np = get_numpy()
     min_val = np.min(image_array)
     max_val = np.max(image_array)
     if max_val - min_val > 0:
@@ -197,8 +292,10 @@ def normalize_image(image_array: np.ndarray) -> np.ndarray:
         normalized_image = image_array.astype(np.float32)
     return normalized_image
 
-def apply_histogram_equalization(image_array: np.ndarray) -> np.ndarray:
+def apply_histogram_equalization(image_array):
     """Applique l'égalisation d'histogramme à l'image."""
+    np = get_numpy()
+    exposure = get_skimage_exposure()
     if len(image_array.shape) > 2:
         equalized_slices = []
         for i in range(image_array.shape[0]):
@@ -211,17 +308,20 @@ def apply_histogram_equalization(image_array: np.ndarray) -> np.ndarray:
 # Fonctions de traitement des signaux (adaptées de votre code)
 def afficher_toutes_metadonnées(signal_path: str) -> Dict:
     """Affiche toutes les métadonnées disponibles d'un signal médical."""
+    wfdb = get_wfdb()
     try:
         record = wfdb.rdheader(signal_path)
         return record.__dict__
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture des métadonnées : {e}")
 
-def stocker_csv(folder_path: str) -> pd.DataFrame:
+def stocker_csv(folder_path: str):
     """
     Extrait les métadonnées de tous les signaux WFDB d'un dossier
     et les renvoie sous forme d'un DataFrame pandas.
     """
+    pd = get_pandas()
+    wfdb = get_wfdb()
     all_metadata = []
     
     # Parcourt tous les fichiers .hea dans le dossier
@@ -255,6 +355,8 @@ def stocker_csv(folder_path: str) -> pd.DataFrame:
 
 def plot_signal(signal_path: str) -> io.BytesIO:
     """Lit et trace le graphique du signal, retourne l'image en mémoire."""
+    wfdb = get_wfdb()
+    plt = get_matplotlib_plt()
     try:
         record = wfdb.rdrecord(signal_path)
         
@@ -302,6 +404,7 @@ def division_df(folder_path: str) -> tuple:
 # Fonctions d'extraction et de traitement
 def extract_text_from_docx(file_content: bytes) -> List[str]:
     """Extraction du texte d'un fichier Word depuis les bytes"""
+    python_docx, Document = get_docx()
     doc = python_docx.Document(io.BytesIO(file_content))
     return [p.text for p in doc.paragraphs if p.text.strip() != ""]
 
@@ -331,7 +434,7 @@ def clean_text(text: str) -> str:
     
     # Suppression des stopwords (français + médicaux)
     try:
-        stop_words = set(stopwords.words('french')).union(medical_stopwords)
+        stop_words = get_stopwords().union(medical_stopwords)
     except:
         stop_words = medical_stopwords
     
@@ -486,8 +589,9 @@ def parse_report(lines: List[str]) -> Dict:
     else:
         return parse_report2(lines)
 
-def generate_annotation_id(row: pd.Series) -> int:
+def generate_annotation_id(row) -> int:
     """Génère un ID d'annotation de 11 chiffres"""
+    pd = get_pandas()
     date_str = row.get('Date', datetime.now().strftime("%d %B %Y"))
     
     try:
@@ -533,8 +637,9 @@ def generate_annotation_id(row: pd.Series) -> int:
     else:
         return 0
 
-def Annotation(df: pd.DataFrame) -> tuple:
+def Annotation(df) -> tuple:
     """Génère l'ID d'annotation et divise en deux DataFrames"""
+    pd = get_pandas()
     if df is None or df.empty:
         return None, None
     
@@ -558,10 +663,11 @@ def Annotation(df: pd.DataFrame) -> tuple:
     
     return df1, df2
 
-def creer_zip_resultats(df_personnel: pd.DataFrame, df_medical: pd.DataFrame) -> bytes:
+def creer_zip_resultats(df_personnel, df_medical) -> bytes:
     """
     Crée un fichier ZIP contenant les résultats en différents formats
     """
+    pd = get_pandas()
     zip_buffer = io.BytesIO()
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
